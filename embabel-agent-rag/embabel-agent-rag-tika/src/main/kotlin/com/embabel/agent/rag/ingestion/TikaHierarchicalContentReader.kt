@@ -57,7 +57,7 @@ class TikaHierarchicalContentReader : HierarchicalContentReader {
     ): MaterializedDocument {
         val resource: Resource = DefaultResourceLoader().getResource(resourcePath)
         return resource.inputStream.use { inputStream ->
-            parseContent(inputStream, resource.uri.toString())
+            parseContent(inputStream, resourcePath)
         }
     }
 
@@ -251,6 +251,7 @@ class TikaHierarchicalContentReader : HierarchicalContentReader {
             id = rootId,
             uri = uri,
             title = documentTitle,
+            ingestionTimestamp = java.time.Instant.now(),
             children = hierarchicalSections,
             metadata = extractMetadataMap(metadata)
         )
@@ -352,6 +353,7 @@ class TikaHierarchicalContentReader : HierarchicalContentReader {
             id = rootId,
             uri = uri,
             title = documentTitle,
+            ingestionTimestamp = java.time.Instant.now(),
             children = hierarchicalSections,
             metadata = extractMetadataMap(metadata)
         )
@@ -385,6 +387,7 @@ class TikaHierarchicalContentReader : HierarchicalContentReader {
             id = rootId,
             uri = uri,
             title = title,
+            ingestionTimestamp = java.time.Instant.now(),
             children = listOf(leafSection),
             metadata = extractMetadataMap(metadata)
         )
@@ -521,6 +524,7 @@ class TikaHierarchicalContentReader : HierarchicalContentReader {
             id = UUID.randomUUID().toString(),
             uri = uri,
             title = metadata.get(TikaCoreProperties.RESOURCE_NAME_KEY) ?: "Empty Document",
+            ingestionTimestamp = java.time.Instant.now(),
             children = emptyList(),
             metadata = extractMetadataMap(metadata)
         )
@@ -551,6 +555,7 @@ class TikaHierarchicalContentReader : HierarchicalContentReader {
             id = rootId,
             uri = uri,
             title = "Parse Error",
+            ingestionTimestamp = java.time.Instant.now(),
             children = listOf(errorSection),
             metadata = extractMetadataMap(metadata) + mapOf("error" to errorMessage)
         )
@@ -612,7 +617,7 @@ class TikaHierarchicalContentReader : HierarchicalContentReader {
 
             logger.info(
                 "Successfully parsed file '{}' - {} sections extracted",
-                filePath, result.leaves().size
+                filePath, result.leaves().count()
             )
 
             result
@@ -734,7 +739,7 @@ class TikaHierarchicalContentReader : HierarchicalContentReader {
                     filesProcessed++
                     logger.debug(
                         "Successfully processed file {} ({}/{}): {} sections",
-                        filePath, index + 1, files.size, result.leaves().size
+                        filePath, index + 1, files.size, result.leaves().count()
                     )
                 } else {
                     filesSkipped++
@@ -752,7 +757,7 @@ class TikaHierarchicalContentReader : HierarchicalContentReader {
 
         logger.info("Directory parsing completed in {} ms", processingTime.toMillis())
         logger.info("Files processed: {}, skipped: {}, errors: {}", filesProcessed, filesSkipped, filesErrored)
-        logger.info("Total sections extracted: {}", contentRoots.sumOf { it.leaves().size })
+        logger.info("Total sections extracted: {}", contentRoots.sumOf { it.leaves().count() })
 
         return DirectoryParsingResult(
             totalFilesFound = files.size,

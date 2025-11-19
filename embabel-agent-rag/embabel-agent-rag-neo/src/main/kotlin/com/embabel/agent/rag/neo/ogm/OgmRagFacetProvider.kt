@@ -16,24 +16,18 @@
 package com.embabel.agent.rag.neo.ogm
 
 import com.embabel.agent.api.common.Embedding
-import com.embabel.agent.rag.model.DefaultMaterializedContainerSection
-import com.embabel.agent.rag.model.MaterializedDocument
-import com.embabel.agent.rag.model.NavigableDocument
 import com.embabel.agent.rag.ingestion.RetrievableEnhancer
-import com.embabel.agent.rag.model.Chunk
-import com.embabel.agent.rag.model.ContentElement
-import com.embabel.agent.rag.model.EntityData
-import com.embabel.agent.rag.model.LeafSection
-import com.embabel.agent.rag.model.Retrievable
+import com.embabel.agent.rag.model.*
 import com.embabel.agent.rag.neo.common.CypherQuery
 import com.embabel.agent.rag.schema.SchemaResolver
 import com.embabel.agent.rag.service.EntitySearch
 import com.embabel.agent.rag.service.RagRequest
-import com.embabel.agent.rag.store.AbstractWritableContentElementRepository
 import com.embabel.agent.rag.service.support.FunctionRagFacet
 import com.embabel.agent.rag.service.support.RagFacet
 import com.embabel.agent.rag.service.support.RagFacetProvider
 import com.embabel.agent.rag.service.support.RagFacetResults
+import com.embabel.agent.rag.store.AbstractChunkingContentElementRepository
+import com.embabel.agent.rag.store.DocumentDeletionResult
 import com.embabel.common.ai.model.DefaultModelSelectionCriteria
 import com.embabel.common.ai.model.ModelProvider
 import com.embabel.common.core.types.SimilarityCutoff
@@ -41,7 +35,6 @@ import com.embabel.common.core.types.SimilarityResult
 import com.embabel.common.core.types.SimpleSimilaritySearchResult
 import org.neo4j.ogm.session.SessionFactory
 import org.slf4j.LoggerFactory
-import org.springframework.ai.document.Document
 import org.springframework.stereotype.Service
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
@@ -61,7 +54,7 @@ class OgmRagFacetProvider(
     platformTransactionManager: PlatformTransactionManager,
     private val properties: NeoRagServiceProperties,
     override val enhancers: List<RetrievableEnhancer> = emptyList(),
-) : AbstractWritableContentElementRepository(properties), RagFacetProvider {
+) : AbstractChunkingContentElementRepository(properties), RagFacetProvider {
 
     private val logger = LoggerFactory.getLogger(OgmRagFacetProvider::class.java)
 
@@ -84,7 +77,7 @@ class OgmRagFacetProvider(
         logger.info("Provisioning complete")
     }
 
-    override fun findChunksById(chunkIds: List<String>): List<Chunk> {
+    override fun findAllChunksById(chunkIds: List<String>): List<Chunk> {
         val session = ogmCypherSearch.currentSession()
         val rows = session.query(
             cypherContentElementQuery(" WHERE c:Chunk AND c.id IN \$ids "),
@@ -106,7 +99,13 @@ class OgmRagFacetProvider(
     }
 
     override fun findById(id: String): ContentElement? {
-        return findChunksById(listOf(id)).firstOrNull()
+        val session = ogmCypherSearch.currentSession()
+        val rows = session.query(
+            cypherContentElementQuery(" WHERE c.id = \$id "),
+            mapOf("id" to id),
+            true,
+        )
+        return rows.mapNotNull(::rowToContentElement).firstOrNull()
     }
 
     override fun save(element: ContentElement): ContentElement {
@@ -136,7 +135,7 @@ class OgmRagFacetProvider(
     }
 
     private fun cypherContentElementQuery(whereClause: String): String =
-        "MATCH (c:ContentElement) $whereClause RETURN c.id AS id, c.uri as uri, c.text AS text, c.parentId as parentId, c.metadata.source as metadata_source, labels(c) as labels"
+        "MATCH (c:ContentElement) $whereClause RETURN c.id AS id, c.uri as uri, c.text AS text, c.parentId as parentId, c.ingestionTimestamp as ingestionDate, c.metadata.source as metadata_source, labels(c) as labels"
 
     private fun rowToContentElement(row: Map<String, Any?>): ContentElement? {
         val metadata = mutableMapOf<String, Any>()
@@ -149,14 +148,24 @@ class OgmRagFacetProvider(
                 parentId = row["parentId"] as String,
                 metadata = metadata,
             )
-        if (labels.contains("Document"))
+        if (labels.contains("Document")) {
+            val ingestionDate = when (val rawDate = row["ingestionDate"]) {
+                is java.time.Instant -> rawDate
+                is java.time.ZonedDateTime -> rawDate.toInstant()
+                is Long -> java.time.Instant.ofEpochMilli(rawDate)
+                is String -> java.time.Instant.parse(rawDate)
+                null -> java.time.Instant.now()
+                else -> java.time.Instant.now()
+            }
             return MaterializedDocument(
                 id = row["id"] as String,
                 title = row["id"] as String,
                 children = emptyList(),
                 metadata = metadata,
                 uri = row["uri"] as String,
+                ingestionTimestamp = ingestionDate,
             )
+        }
         if (labels.contains("LeafSection"))
             return LeafSection(
                 id = row["id"] as String,
@@ -232,8 +241,52 @@ class OgmRagFacetProvider(
         )
     }
 
-    override fun accept(t: List<Document>) {
-        TODO("Not yet implemented")
+    override fun deleteRootAndDescendants(uri: String): DocumentDeletionResult? {
+        logger.info("Deleting document with URI: {}", uri)
+
+        try {
+            val result = ogmCypherSearch.query(
+                "Delete document and descendants",
+                query = "delete_document_and_descendants",
+                params = mapOf("uri" to uri)
+            )
+
+            val deletedCount = result.queryStatistics().nodesDeleted
+
+            if (deletedCount == 0) {
+                logger.warn("No document found with URI: {}", uri)
+                return null
+            }
+
+            logger.info("Deleted {} elements for document with URI: {}", deletedCount, uri)
+            return DocumentDeletionResult(
+                rootUri = uri,
+                deletedCount = deletedCount
+            )
+        } catch (e: Exception) {
+            logger.error("Error deleting document with URI: {}", uri, e)
+            throw e
+        }
+    }
+
+    override fun findContentRootByUri(uri: String): ContentRoot? {
+        logger.debug("Finding root document with URI: {}", uri)
+
+        try {
+            val session = ogmCypherSearch.currentSession()
+            val rows = session.query(
+                cypherContentElementQuery(" WHERE c.uri = \$uri AND ('Document' IN labels(c) OR 'ContentRoot' IN labels(c)) "),
+                mapOf("uri" to uri),
+                true
+            )
+
+            val element = rows.mapNotNull(::rowToContentElement).firstOrNull()
+            logger.debug("Root document with URI {} found: {}", uri, element != null)
+            return element as? ContentRoot
+        } catch (e: Exception) {
+            logger.error("Error finding root with URI: {}", uri, e)
+            return null
+        }
     }
 
     override fun facets(): List<RagFacet<out Retrievable>> {

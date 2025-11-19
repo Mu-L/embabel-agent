@@ -20,16 +20,14 @@ import com.embabel.agent.rag.ingestion.ContentChunker
 import com.embabel.agent.rag.ingestion.ContentChunker.Companion.CONTAINER_SECTION_ID
 import com.embabel.agent.rag.ingestion.ContentChunker.Companion.SEQUENCE_NUMBER
 import com.embabel.agent.rag.ingestion.RetrievableEnhancer
-import com.embabel.agent.rag.model.Chunk
-import com.embabel.agent.rag.model.ContentElement
-import com.embabel.agent.rag.model.NavigableDocument
-import com.embabel.agent.rag.model.Retrievable
+import com.embabel.agent.rag.model.*
 import com.embabel.agent.rag.service.RagRequest
 import com.embabel.agent.rag.service.support.FunctionRagFacet
 import com.embabel.agent.rag.service.support.RagFacet
 import com.embabel.agent.rag.service.support.RagFacetProvider
 import com.embabel.agent.rag.service.support.RagFacetResults
-import com.embabel.agent.rag.store.AbstractWritableContentElementRepository
+import com.embabel.agent.rag.store.AbstractChunkingContentElementRepository
+import com.embabel.agent.rag.store.DocumentDeletionResult
 import com.embabel.common.core.types.HasInfoString
 import com.embabel.common.core.types.SimpleSimilaritySearchResult
 import com.embabel.common.util.indent
@@ -53,7 +51,6 @@ import java.io.Closeable
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.sqrt
-import org.springframework.ai.document.Document as SpringAiDocument
 
 /**
  * Lucene RAG facet with optional vector search support via an EmbeddingModel.
@@ -77,7 +74,7 @@ class LuceneRagFacetProvider @JvmOverloads constructor(
     private val vectorWeight: Double = 0.5,
     chunkerConfig: ContentChunker.Config = ContentChunker.DefaultConfig(),
     private val indexPath: Path? = null,
-) : RagFacetProvider, AbstractWritableContentElementRepository(chunkerConfig), HasInfoString, Closeable {
+) : RagFacetProvider, AbstractChunkingContentElementRepository(chunkerConfig), HasInfoString, Closeable {
 
     private val logger = LoggerFactory.getLogger(LuceneRagFacetProvider::class.java)
 
@@ -143,7 +140,7 @@ class LuceneRagFacetProvider @JvmOverloads constructor(
         )
     }
 
-    override fun findChunksById(chunkIds: List<String>): List<Chunk> {
+    override fun findAllChunksById(chunkIds: List<String>): List<Chunk> {
         logger.debug("Finding chunks by IDs: {}", chunkIds)
 
         val foundChunks = chunkIds.mapNotNull { chunkId ->
@@ -461,29 +458,6 @@ class LuceneRagFacetProvider @JvmOverloads constructor(
         )
     }
 
-
-    override fun accept(documents: List<SpringAiDocument>) {
-        logger.info("Indexing {} documents into Lucene RAG service and storing as chunks", documents.size)
-        documents.forEach { springDoc ->
-            // Create and store chunk in memory
-            val chunk = Chunk(
-                id = springDoc.id,
-                text = springDoc.text ?: "",
-                parentId = springDoc.id,
-                metadata = springDoc.metadata + mapOf(
-                    "indexed_at" to System.currentTimeMillis(),
-                    "service" to name
-                )
-            )
-            onNewRetrievable(chunk)
-        }
-        commit()
-        logger.info(
-            "Successfully indexed {} documents. Total chunks in storage: {}",
-            documents.size, contentElementStorage.size
-        )
-    }
-
     override fun onNewRetrievables(retrievables: List<Retrievable>) {
         retrievables.forEach { onNewRetrievable(it) }
     }
@@ -708,6 +682,92 @@ class LuceneRagFacetProvider @JvmOverloads constructor(
         directory.close()
         analyzer.close()
         contentElementStorage.clear()
+    }
+
+    override fun deleteRootAndDescendants(uri: String): DocumentDeletionResult? {
+        logger.info("Deleting document with URI: {}", uri)
+        synchronized(this) {
+            // Find the root document with this URI
+            val root = contentElementStorage.values.find {
+                it.uri == uri && it.labels().any { label ->
+                    label.contains("Document") || label.contains("ContentRoot")
+                }
+            }
+
+            if (root == null) {
+                logger.warn("No document found with URI: {}", uri)
+                return null
+            }
+
+            logger.debug("Found root document with id: {}", root.id)
+
+            // Find all elements to delete: root and all descendants (by URI or parent relationships)
+            val toDelete = mutableSetOf<String>()
+            toDelete.add(root.id)
+
+            // Add all elements with the same URI
+            contentElementStorage.values.forEach { element ->
+                if (element.uri == uri) {
+                    toDelete.add(element.id)
+                }
+            }
+
+            // Also find descendants by parent relationships
+            val parentsToCheck = toDelete.toMutableSet()
+            while (parentsToCheck.isNotEmpty()) {
+                val currentParents = parentsToCheck.toSet()
+                parentsToCheck.clear()
+
+                contentElementStorage.values.forEach { element ->
+                    // Check if this element has a parent in our set
+                    val parentId = when (element) {
+                        is Chunk -> element.parentId
+                        is LeafSection -> element.parentId
+                        is NavigableContainerSection -> element.parentId
+                        else -> null
+                    }
+
+                    if (parentId != null && currentParents.contains(parentId) && !toDelete.contains(element.id)) {
+                        toDelete.add(element.id)
+                        parentsToCheck.add(element.id)
+                    }
+                }
+            }
+
+            logger.info("Found {} elements to delete for URI: {}", toDelete.size, uri)
+
+            // Delete from Lucene index
+            toDelete.forEach { id ->
+                indexWriter.deleteDocuments(org.apache.lucene.index.Term(ID_FIELD, id))
+            }
+
+            // Delete from content storage
+            toDelete.forEach { id ->
+                contentElementStorage.remove(id)
+            }
+
+            // Commit changes
+            commit()
+
+            val result = DocumentDeletionResult(
+                rootUri = uri,
+                deletedCount = toDelete.size
+            )
+
+            logger.info("Deleted {} elements for document with URI: {}", toDelete.size, uri)
+            return result
+        }
+    }
+
+    override fun findContentRootByUri(uri: String): ContentRoot? {
+        logger.debug("Finding root document with URI: {}", uri)
+        return synchronized(this) {
+            contentElementStorage.values.find {
+                it.uri == uri && it.labels().any { label ->
+                    label.contains("Document") || label.contains("ContentRoot")
+                }
+            } as? ContentRoot
+        }
     }
 
     /**

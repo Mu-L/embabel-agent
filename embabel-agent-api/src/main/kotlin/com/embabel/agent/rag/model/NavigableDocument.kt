@@ -15,18 +15,29 @@
  */
 package com.embabel.agent.rag.model
 
+import java.time.Instant
+
 interface NavigableContainerSection : ContainerSection, NavigableSection {
 
-    fun descendants(): List<NavigableSection> =
-        children + children.filterIsInstance<NavigableContainerSection>().flatMap { containerChild ->
-            containerChild.descendants()
+    /**
+     * All descendant sections of this container
+     */
+    fun descendants(): Iterable<NavigableSection> = sequence {
+        yieldAll(children)
+        children.filterIsInstance<NavigableContainerSection>().forEach { containerChild ->
+            yieldAll(containerChild.descendants())
         }
+    }.asIterable()
 
-    fun leaves(): List<LeafSection> =
-        children.filterIsInstance<LeafSection>() +
-                children.filterIsInstance<NavigableContainerSection>().flatMap { containerChild ->
-                    containerChild.leaves()
-                }
+    /**
+     * All descendant leaf sections of this container
+     */
+    fun leaves(): Iterable<LeafSection> = sequence {
+        yieldAll(children.filterIsInstance<LeafSection>())
+        children.filterIsInstance<NavigableContainerSection>().forEach { containerChild ->
+            yieldAll(containerChild.leaves())
+        }
+    }.asIterable()
 }
 
 data class DefaultMaterializedContainerSection(
@@ -45,6 +56,8 @@ interface NavigableDocument : ContentRoot, NavigableContainerSection {
 
     override fun labels(): Set<String> = super<ContentRoot>.labels() + super<NavigableContainerSection>.labels()
 
+    override fun propertiesToPersist(): Map<String, Any?> = super<ContentRoot>.propertiesToPersist()
+
 }
 
 /**
@@ -54,6 +67,7 @@ data class MaterializedDocument(
     override val id: String,
     override val uri: String,
     override val title: String,
+    override val ingestionTimestamp: Instant = Instant.now(),
     override val children: List<NavigableSection>,
     override val metadata: Map<String, Any?> = emptyMap(),
 ) : NavigableDocument

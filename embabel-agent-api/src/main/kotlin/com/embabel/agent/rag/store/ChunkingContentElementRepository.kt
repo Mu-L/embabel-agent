@@ -16,19 +16,44 @@
 package com.embabel.agent.rag.store
 
 import com.embabel.agent.rag.ingestion.RetrievableEnhancer
+import com.embabel.agent.rag.model.ContentRoot
+import com.embabel.agent.rag.model.NavigableDocument
 import com.embabel.agent.rag.model.Retrievable
+
+/**
+ * Result of successfully deleting the content root with the given uri
+ * and its descendants
+ * @param rootUri the uri of the deleted root
+ * @param deletedCount number of content elements deleted
+ */
+data class DocumentDeletionResult(
+    val rootUri: String,
+    val deletedCount: Int,
+)
 
 /**
  * WritableRagService that also allows us to load and save ContentElements.
  */
-interface WritableContentElementRepository : WritableStore, ContentElementRepository {
+interface ChunkingContentElementRepository : ContentElementRepository {
 
     /**
-     * Provision this rag service if necessary
+     * Write the given content root and its children to the underlying store.
+     * @return list of chunk ids
      */
-    fun provision() {
-        // Default no-op
-    }
+    fun writeAndChunkDocument(root: NavigableDocument): List<String>
+
+    /**
+     * Delete the document root with this uri
+     * Return null if no such document
+     */
+    fun deleteRootAndDescendants(uri: String): DocumentDeletionResult?
+
+    fun findContentRootByUri(uri: String): ContentRoot?
+
+    /**
+     * Does a root with the given uri exist?
+     */
+    fun existsRootWithUri(uri: String): Boolean = findContentRootByUri(uri) != null
 
     /**
      * List of enhancers

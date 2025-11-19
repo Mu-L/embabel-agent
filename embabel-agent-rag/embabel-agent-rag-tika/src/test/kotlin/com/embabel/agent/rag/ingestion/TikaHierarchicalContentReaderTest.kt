@@ -65,7 +65,7 @@ class TikaHierarchicalContentReaderTest {
             // Check descendants (all sections in hierarchy including preambles)
             val allDescendants = result.descendants()
             // Main Title container + preamble, Section 1 container + preamble, Subsection 1.1 leaf, Section 2 leaf = 6
-            assertEquals(6, allDescendants.size)
+            assertEquals(6, allDescendants.count())
             assertEquals("test://example.md", result.uri)
             assertNotNull(result.id)
 
@@ -116,7 +116,7 @@ class TikaHierarchicalContentReaderTest {
             val allDescendants = result.descendants()
             // Document Title, Chapter 1, Section 1.1, Subsection 1.1.1, Section 1.2, Chapter 2 (sections)
             // + preambles for Document Title, Chapter 1, Section 1.1 = 9 total
-            assertEquals(9, allDescendants.size)
+            assertEquals(9, allDescendants.count())
             assertNotNull(result.id)
 
             val titles = allDescendants.map { it.title }
@@ -160,7 +160,7 @@ class TikaHierarchicalContentReaderTest {
 
             val allDescendants = result.descendants()
             // Code Examples container + preamble + Another Section leaf = 3
-            assertEquals(3, allDescendants.size)
+            assertEquals(3, allDescendants.count())
             val titles = allDescendants.map { it.title }
             assertTrue(titles.contains("Code Examples"))
             assertTrue(titles.contains("Another Section"))
@@ -233,7 +233,7 @@ class TikaHierarchicalContentReaderTest {
             // Check all descendants (including preambles)
             val allDescendants = result.descendants()
             // Each level has content so gets preamble: L1, L1_preamble, L2, L2_preamble, L3, L3_preamble, L4 = 7
-            assertEquals(7, allDescendants.size)
+            assertEquals(7, allDescendants.count())
             // Note: titles will include duplicates due to preambles having same title as their container
             val uniqueTitles = allDescendants.map { it.title }.distinct()
             assertTrue(
@@ -275,7 +275,7 @@ class TikaHierarchicalContentReaderTest {
             // Check all descendants (including preambles)
             val allDescendants = result.descendants()
             // Main, Main_preamble, Sub, Sub_preamble, Deep = 5
-            assertEquals(5, allDescendants.size)
+            assertEquals(5, allDescendants.count())
 
             // All sections should have parent IDs set
             allDescendants.forEach { section ->
@@ -316,7 +316,7 @@ class TikaHierarchicalContentReaderTest {
             // Check all descendants (including preambles)
             val allDescendants = result.descendants()
             // Test Document container + preamble + First Section leaf + Second Section leaf = 4
-            assertEquals(4, allDescendants.size)
+            assertEquals(4, allDescendants.count())
             assertNotNull(result.id)
             val titles = allDescendants.map { it.title }
             assertTrue(titles.contains("Test Document"))
@@ -452,7 +452,7 @@ class TikaHierarchicalContentReaderTest {
             val result = reader.parseContent(inputStream, metadata = metadata, uri = "test://test.md")
 
             // Test leaves() method (includes preambles)
-            val allLeaves = result.leaves()
+            val allLeaves = result.leaves().toList()
             // Top preamble, Mid1 preamble, Deep1 leaf, Mid2 leaf = 4
             assertEquals(4, allLeaves.size, "Should have 4 leaves (Top preamble, Mid1 preamble, Deep1, and Mid2)")
 
@@ -488,7 +488,7 @@ class TikaHierarchicalContentReaderTest {
             // Should detect HTML and parse headings hierarchically (including preambles)
             val allDescendants = result.descendants()
             // First Heading container + preamble + Second Heading leaf = 3
-            assertEquals(3, allDescendants.size)
+            assertEquals(3, allDescendants.count())
             val titles = allDescendants.map { it.title }
             assertTrue(titles.contains("First Heading"))
             assertTrue(titles.contains("Second Heading"))
@@ -518,7 +518,7 @@ class TikaHierarchicalContentReaderTest {
             // HTML headings should create hierarchical sections (including preambles)
             val allDescendants = result.descendants()
             // Main Heading container + preamble + Second Heading leaf = 3
-            assertEquals(3, allDescendants.size)
+            assertEquals(3, allDescendants.count())
 
             val titles = allDescendants.map { it.title }
             assertTrue(titles.contains("Main Heading"))
@@ -563,7 +563,7 @@ class TikaHierarchicalContentReaderTest {
             // HTML headings should create hierarchical sections like markdown (including preambles)
             val allDescendants = result.descendants()
             // Main Heading container + preamble, Second Heading container + preamble, Sub Heading leaf, Third Heading leaf = 6
-            assertEquals(6, allDescendants.size)
+            assertEquals(6, allDescendants.count())
 
             val titles = allDescendants.map { it.title }
             assertTrue(titles.contains("Main Heading"))
@@ -604,17 +604,63 @@ class TikaHierarchicalContentReaderTest {
             val tempFile = Files.createTempFile("test", ".html")
             Files.writeString(tempFile, html)
 
-            val result = reader.parseUrl("file:${tempFile.toAbsolutePath()}")
+            val fileUrl = "file:${tempFile.toAbsolutePath()}"
+            val result = reader.parseUrl(fileUrl)
+
+            // Verify URI is correctly set on document
+            assertEquals(fileUrl, result.uri, "Document URI should match the input file URL")
 
             val allDescendants = result.descendants()
             // Introduction container + preamble + Features leaf + Conclusion leaf = 4
-            assertEquals(4, allDescendants.size)
+            assertEquals(4, allDescendants.count())
             val titles = allDescendants.map { it.title }
             assertTrue(titles.contains("Introduction"))
             assertTrue(titles.contains("Features"))
             assertTrue(titles.contains("Conclusion"))
 
+            // Verify all descendant sections also have the correct URI
+            allDescendants.forEach { section ->
+                assertEquals(fileUrl, section.uri, "Section '${section.title}' should have URI matching input file URL")
+            }
+
             Files.deleteIfExists(tempFile)
+        }
+
+        @Test
+        fun `test parseUrl preserves exact URI including custom schemes`() {
+            val html = """
+            <html>
+            <body>
+                <h1>Test</h1>
+                <p>Content</p>
+            </body>
+            </html>
+            """.trimIndent()
+
+            // Test with file URL
+            val tempFile = Files.createTempFile("test", ".html")
+            Files.writeString(tempFile, html)
+            val fileUrl = "file:${tempFile.toAbsolutePath()}"
+            val fileResult = reader.parseUrl(fileUrl)
+            assertEquals(fileUrl, fileResult.uri, "Document URI should exactly match input file URL")
+            fileResult.descendants().forEach { section ->
+                assertEquals(fileUrl, section.uri, "All sections should have matching URI")
+            }
+            Files.deleteIfExists(tempFile)
+
+            // Test with classpath resource
+            val classpathUrl = "classpath:application-test.properties"
+            val classpathResult = reader.parseUrl(classpathUrl)
+            assertEquals(classpathUrl, classpathResult.uri, "Document URI should exactly match input classpath URL")
+
+            // Test with HTTP URL simulation via ByteArrayInputStream
+            val httpUrl = "https://example.com/document.html"
+            val inputStream = ByteArrayInputStream(html.toByteArray())
+            val httpResult = reader.parseContent(inputStream, httpUrl)
+            assertEquals(httpUrl, httpResult.uri, "Document URI should exactly match input HTTP URL")
+            httpResult.descendants().forEach { section ->
+                assertEquals(httpUrl, section.uri, "All sections should have matching URI")
+            }
         }
 
         @Test
@@ -720,10 +766,10 @@ class TikaHierarchicalContentReaderTest {
             // Test descendants() method (including preambles)
             val allDescendants = result.descendants()
             // Top Level container + preamble, Mid Level container + preamble, Deep Level leaf = 5
-            assertEquals(5, allDescendants.size, "Should have 5 total descendants")
+            assertEquals(5, allDescendants.count(), "Should have 5 total descendants")
 
             // Test leaves() method (includes preambles)
-            val allLeaves = result.leaves()
+            val allLeaves = result.leaves().toList()
             // Top preamble, Mid preamble, Deep leaf = 3
             assertEquals(3, allLeaves.size, "Should have 3 leaves (Top preamble, Mid preamble, Deep Level)")
             assertTrue(allLeaves.any { it.title == "Deep Level" })
@@ -957,15 +1003,15 @@ class TikaHierarchicalContentReaderTest {
             val documentRoot = result.contentRoots.find { it.title == "Test Document" }
             assertNotNull(documentRoot)
             // Test Document has preamble + Section 1 leaf = 2 leaves
-            assertEquals(2, documentRoot!!.leaves().size)
+            assertEquals(2, documentRoot!!.leaves().count())
 
             val readmeRoot = result.contentRoots.find { it.title == "This is a simple text file." }
             assertNotNull(readmeRoot)
-            assertEquals(1, readmeRoot!!.leaves().size) // 1 section in readme.txt
+            assertEquals(1, readmeRoot!!.leaves().count()) // 1 section in readme.txt
 
             val subRoot = result.contentRoots.find { it.title == "Sub Document" }
             assertNotNull(subRoot)
-            assertEquals(1, subRoot!!.leaves().size) // 1 section in sub.md
+            assertEquals(1, subRoot!!.leaves().count()) // 1 section in sub.md
         }
 
         @Test
